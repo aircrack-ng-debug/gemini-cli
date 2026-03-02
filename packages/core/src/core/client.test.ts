@@ -267,7 +267,7 @@ describe('Gemini Client (client.ts)', () => {
         },
       },
       isInteractive: vi.fn().mockReturnValue(false),
-      getExperiments: () => {},
+      getExperiments: () => { },
       getActiveModel: vi.fn().mockReturnValue('test-model'),
       setActiveModel: vi.fn(),
       resetTurn: vi.fn(),
@@ -833,20 +833,20 @@ describe('Gemini Client (client.ts)', () => {
 Here is the user's editor context as a JSON object. This is for your information only.
 \`\`\`json
 ${JSON.stringify(
-  {
-    activeFile: {
-      path: '/path/to/active/file.ts',
-      cursor: {
-        line: 5,
-        character: 10,
-      },
-      selectedText: 'hello',
-    },
-    otherOpenFiles: ['/path/to/recent/file1.ts', '/path/to/recent/file2.ts'],
-  },
-  null,
-  2,
-)}
+        {
+          activeFile: {
+            path: '/path/to/active/file.ts',
+            cursor: {
+              line: 5,
+              character: 10,
+            },
+            selectedText: 'hello',
+          },
+          otherOpenFiles: ['/path/to/recent/file1.ts', '/path/to/recent/file2.ts'],
+        },
+        null,
+        2,
+      )}
 \`\`\`
       `.trim();
       const expectedRequest = [{ text: expectedContext }];
@@ -956,19 +956,19 @@ ${JSON.stringify(
 Here is the user's editor context as a JSON object. This is for your information only.
 \`\`\`json
 ${JSON.stringify(
-  {
-    activeFile: {
-      path: '/path/to/active/file.ts',
-      cursor: {
-        line: 5,
-        character: 10,
-      },
-      selectedText: 'hello',
-    },
-  },
-  null,
-  2,
-)}
+        {
+          activeFile: {
+            path: '/path/to/active/file.ts',
+            cursor: {
+              line: 5,
+              character: 10,
+            },
+            selectedText: 'hello',
+          },
+        },
+        null,
+        2,
+      )}
 \`\`\`
       `.trim();
       const expectedRequest = [{ text: expectedContext }];
@@ -1034,12 +1034,12 @@ ${JSON.stringify(
 Here is the user's editor context as a JSON object. This is for your information only.
 \`\`\`json
 ${JSON.stringify(
-  {
-    otherOpenFiles: ['/path/to/recent/file1.ts', '/path/to/recent/file2.ts'],
-  },
-  null,
-  2,
-)}
+        {
+          otherOpenFiles: ['/path/to/recent/file1.ts', '/path/to/recent/file2.ts'],
+        },
+        null,
+        2,
+      )}
 \`\`\`
       `.trim();
       const expectedRequest = [{ text: expectedContext }];
@@ -3280,6 +3280,70 @@ ${JSON.stringify(
           expect.anything(),
           undefined,
         );
+        // AfterAgent should fire on BOTH iterations (hookStateMap reset)
+        expect(mockHookSystem.fireAfterAgentEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('should support multiple consecutive AfterAgent block iterations', async () => {
+        // Simulate 3 block iterations before allowing
+        mockHookSystem.fireAfterAgentEvent
+          .mockResolvedValueOnce({
+            shouldStopExecution: () => false,
+            isBlockingDecision: () => true,
+            getEffectiveReason: () => 'Iteration 1',
+            shouldClearContext: () => false,
+            systemMessage: '🔄 Starting iteration 2...',
+          })
+          .mockResolvedValueOnce({
+            shouldStopExecution: () => false,
+            isBlockingDecision: () => true,
+            getEffectiveReason: () => 'Iteration 2',
+            shouldClearContext: () => false,
+            systemMessage: '🔄 Starting iteration 3...',
+          })
+          .mockResolvedValueOnce({
+            shouldStopExecution: () => false,
+            isBlockingDecision: () => true,
+            getEffectiveReason: () => 'Iteration 3',
+            shouldClearContext: () => false,
+            systemMessage: '🔄 Starting iteration 4...',
+          })
+          .mockResolvedValueOnce({
+            shouldStopExecution: () => false,
+            isBlockingDecision: () => false,
+            shouldClearContext: () => false,
+            systemMessage: undefined,
+          });
+
+        let callCount = 0;
+        mockTurnRunFn.mockImplementation(async function* (
+          this: MockTurnContext,
+        ) {
+          callCount++;
+          const response = `Response ${callCount}`;
+          this.getResponseText.mockReturnValue(response);
+          yield { type: GeminiEventType.Content, value: response };
+        });
+
+        const stream = client.sendMessageStream(
+          { text: 'Start loop' },
+          new AbortController().signal,
+          'test-prompt-multi-block',
+        );
+        const events = await fromAsync(stream);
+
+        // Should have run the model 4 times (original + 3 re-prompts)
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(4);
+
+        // AfterAgent should have fired 4 times (once per iteration)
+        expect(mockHookSystem.fireAfterAgentEvent).toHaveBeenCalledTimes(4);
+
+        // Should have yielded 3 blocked events
+        const blockedEvents = events.filter(
+          (e: { type: string }) =>
+            e.type === GeminiEventType.AgentExecutionBlocked,
+        );
+        expect(blockedEvents).toHaveLength(3);
       });
 
       it('should call resetChat when AfterAgent hook returns shouldClearContext: true', async () => {

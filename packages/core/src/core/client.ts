@@ -77,13 +77,13 @@ const MAX_TURNS = 100;
 
 type BeforeAgentHookReturn =
   | {
-      type: GeminiEventType.AgentExecutionStopped;
-      value: { reason: string; systemMessage?: string };
-    }
+    type: GeminiEventType.AgentExecutionStopped;
+    value: { reason: string; systemMessage?: string };
+  }
   | {
-      type: GeminiEventType.AgentExecutionBlocked;
-      value: { reason: string; systemMessage?: string };
-    }
+    type: GeminiEventType.AgentExecutionBlocked;
+    value: { reason: string; systemMessage?: string };
+  }
   | { additionalContext: string | undefined }
   | undefined;
 
@@ -398,9 +398,9 @@ export class GeminiClient {
           path: activeFile.path,
           cursor: activeFile.cursor
             ? {
-                line: activeFile.cursor.line,
-                character: activeFile.cursor.character,
-              }
+              line: activeFile.cursor.line,
+              character: activeFile.cursor.character,
+            }
             : undefined,
           selectedText: activeFile.selectedText || undefined,
         };
@@ -479,9 +479,9 @@ export class GeminiClient {
             path: currentActiveFile.path,
             cursor: currentActiveFile.cursor
               ? {
-                  line: currentActiveFile.cursor.line,
-                  character: currentActiveFile.cursor.character,
-                }
+                line: currentActiveFile.cursor.line,
+                character: currentActiveFile.cursor.character,
+              }
               : undefined,
             selectedText: currentActiveFile.selectedText || undefined,
           };
@@ -905,6 +905,12 @@ export class GeminiClient {
           if (contextCleared) {
             await this.resetChat();
           }
+          // Reset hook state so AfterAgent can fire again on the re-sent
+          // prompt. This is safe because we are about to start a fresh agent
+          // turn with the reason as the new prompt — it should be treated as
+          // a new hook lifecycle. Internal recursions (e.g. nextSpeaker
+          // continuations) are unaffected since they don't delete the state.
+          this.hookStateMap.delete(prompt_id);
           const continueRequest = [{ text: continueReason }];
           yield* this.sendMessageStream(
             continueRequest,
