@@ -205,6 +205,7 @@ export * from './hooks/types.js';
 
 // Export agent types
 export * from './agents/types.js';
+export { isSubagentProgress } from './agents/types.js';
 
 // Export stdio utils
 export * from './utils/stdio.js';
