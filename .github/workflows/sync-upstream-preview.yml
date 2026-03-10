@@ -1,0 +1,198 @@
+name: Sync Latest Preview + Apply Bugfix
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (nur prüfen, nicht pushen)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/google-gemini/gemini-cli.git
+          git fetch upstream --tags
+
+      - name: Get latest preview release tag
+        id: latest_preview
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releases = await github.rest.repos.listReleases({
+              owner: 'google-gemini',
+              repo: 'gemini-cli',
+              per_page: 50
+            });
+
+            const preview = releases.data.find(r =>
+              r.tag_name.includes('-preview.') || r.tag_name.includes('-nightly.')
+            );
+
+            if (!preview) {
+              core.setFailed('Keine Preview-Release gefunden!');
+              return;
+            }
+
+            console.log(`Neueste Preview: ${preview.tag_name}`);
+            core.setOutput('tag', preview.tag_name);
+            core.setOutput('url', preview.html_url);
+
+      - name: Check if update is needed
+        id: check_update
+        run: |
+          NEW_TAG="${{ steps.latest_preview.outputs.tag }}"
+
+          LAST_TAG=$(git show origin/patched-preview:.last-synced-tag 2>/dev/null || echo "")
+
+          if [ "$LAST_TAG" = "$NEW_TAG" ]; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Bereits aktuell auf $NEW_TAG - kein Update nötig."
+          else
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "🔄 Update nötig: $LAST_TAG → $NEW_TAG"
+          fi
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Identify bugfix commits
+        id: bugfix_commits
+        if: steps.check_update.outputs.already_up_to_date == 'false'
+        run: |
+          BUGFIX_COMMITS="18bf052eb320e67d650d8c0a9986bc20bdeaf01d
+          70dad9aa5955b80d9d88a53bc87e8d587fb63f2f"
+
+          COUNT=2
+          echo "🩹 $COUNT eigene Bugfix-Commit(s) konfiguriert."
+          echo "bugfix_commits<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BUGFIX_COMMITS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "bugfix_count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Create patched-preview branch
+        id: create_branch
+        if: steps.check_update.outputs.already_up_to_date == 'false'
+        run: |
+          NEW_TAG="${{ steps.check_update.outputs.new_tag }}"
+
+          echo "📦 Erstelle patched-preview auf Basis von Tag: $NEW_TAG"
+          git checkout -B patched-preview "refs/tags/${NEW_TAG}"
+
+          echo "${NEW_TAG}" > .last-synced-tag
+          git add .last-synced-tag
+          git commit -m "chore: track synced upstream tag ${NEW_TAG}"
+
+      - name: Apply bugfix commits
+        id: apply_bugfix
+        if: steps.check_update.outputs.already_up_to_date == 'false' && steps.bugfix_commits.outputs.bugfix_count != '0'
+        run: |
+          BUGFIX_COMMITS="${{ steps.bugfix_commits.outputs.bugfix_commits }}"
+          CONFLICT=false
+
+          echo "🩹 Wende Bugfix-Commits an..."
+
+          while IFS= read -r commit_sha; do
+            commit_sha=$(echo "$commit_sha" | tr -d '[:space:]')
+            if [ -z "$commit_sha" ]; then continue; fi
+
+            COMMIT_MSG=$(git log --format="%s" -1 "$commit_sha" 2>/dev/null || echo "unknown")
+            echo "  → Cherry-pick: $commit_sha ($COMMIT_MSG)"
+
+            if ! git cherry-pick "$commit_sha"; then
+              echo "❌ Merge-Konflikt bei Commit: $commit_sha"
+              git cherry-pick --abort
+              CONFLICT=true
+              echo "conflict_commit=$commit_sha" >> "$GITHUB_OUTPUT"
+              echo "conflict_msg=$COMMIT_MSG" >> "$GITHUB_OUTPUT"
+              break
+            fi
+          done <<< "$BUGFIX_COMMITS"
+
+          if [ "$CONFLICT" = "true" ]; then
+            echo "has_conflict=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Alle Bugfix-Commits erfolgreich angewendet!"
+          fi
+
+      - name: Push patched-preview branch
+        if: |
+          steps.check_update.outputs.already_up_to_date == 'false' &&
+          steps.apply_bugfix.outputs.has_conflict != 'true' &&
+          inputs.dry_run != 'true'
+        run: |
+          NEW_TAG="${{ steps.check_update.outputs.new_tag }}"
+          git push origin patched-preview --force
+          echo "🚀 Branch 'patched-preview' erfolgreich auf $NEW_TAG aktualisiert!"
+
+      - name: Create issue on conflict
+        if: steps.apply_bugfix.outputs.has_conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const newTag = '${{ steps.check_update.outputs.new_tag }}';
+            const conflictCommit = '${{ steps.apply_bugfix.outputs.conflict_commit }}';
+            const conflictMsg = '${{ steps.apply_bugfix.outputs.conflict_msg }}';
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Merge-Konflikt beim Sync auf ${newTag}`,
+              body: `## Automatischer Upstream-Sync fehlgeschlagen
+
+            Der Workflow konnte den Bugfix nicht automatisch auf die neue Preview-Version anwenden.
+
+            **Neue Upstream-Version:** [\`${newTag}\`](https://github.com/google-gemini/gemini-cli/releases/tag/${newTag})
+            **Konflikt bei Commit:** \`${conflictCommit}\`
+            **Commit-Nachricht:** ${conflictMsg}
+
+            ### Manuelle Schritte
+
+            \`\`\`bash
+            git fetch upstream --tags
+            git checkout -B patched-preview refs/tags/${newTag}
+            git cherry-pick 18bf052eb320e67d650d8c0a9986bc20bdeaf01d
+            git cherry-pick 70dad9aa5955b80d9d88a53bc87e8d587fb63f2f
+            # Konflikte manuell lösen
+            git push origin patched-preview --force
+            \`\`\`
+
+            **Workflow-Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            `,
+              labels: ['bug', 'needs-manual-action']
+            });
+
+      - name: Summary
+        if: always()
+        run: |
+          NEW_TAG="${{ steps.check_update.outputs.new_tag }}"
+          UP_TO_DATE="${{ steps.check_update.outputs.already_up_to_date }}"
+          CONFLICT="${{ steps.apply_bugfix.outputs.has_conflict }}"
+
+          echo "## Sync Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Wert |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Neueste Preview | \`${NEW_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Bereits aktuell | ${UP_TO_DATE} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Konflikt | ${CONFLICT:-false} |" >> "$GITHUB_STEP_SUMMARY"
